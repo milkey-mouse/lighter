@@ -44,14 +44,11 @@ enum Match {
     Wild,
 }
 
-fn match_prefix(
+/*fn match_prefix(
     prefix: &mut Vec<u8>,
-    cases: &mut Peekable<impl Iterator<Item = (Box<[u8]>, (Span, Rc<Expr>))>>,
+    cases: &mut BTreeMap<Box<[u8]>, (Span, Rc<Expr>)>,
     wild: &mut Option<(Span, Rc<Expr>)>,
 ) {
-    //) -> BTreeMap<Match, (Span, Rc<Expr>)> {
-    //let map = BTreeMap::new();
-
     println!("match_prefix {:?}", prefix);
 
     while let Some((key, (span, body))) =
@@ -92,7 +89,7 @@ fn match_prefix(
     }
 
     //map
-}
+}*/
 
 #[proc_macro]
 pub fn lighter(input: TokenStream) -> TokenStream {
@@ -106,8 +103,42 @@ pub fn lighter(input: TokenStream) -> TokenStream {
     }
 
     //dbg!(cases, wild);
+    for key in cases.keys() {
+        println!("{:?}", key);
+    }
 
-    match_prefix(&mut Vec::new(), &mut cases.into_iter().peekable(), &mut wild);
+    println!("match s.next() {{");
+    // TODO: use Option?
+    let mut last_key: Box<[u8]> = Box::new([]);
+    for (key, (span, body)) in cases {
+        let common_prefix = last_key.iter().zip(key.iter()).take_while(|(a, b)| a == b).count();
+
+        if key.len() - common_prefix == 1 {
+            println!("//opportunity for sharing");
+        }
+        
+        // close match statements for bytes that
+        // are different between last_key and key
+        for _ in common_prefix..last_key.len() {
+            println!("_ => panic!(\"default\"),");
+            println!("}}");
+        }
+
+        // open new match statements for new prefix bytes
+        for b in &key[common_prefix..] {
+            println!("{} => match s.next() {{", b);
+        }
+
+        println!("None => panic!(\"found {:?}\"),", key);
+
+        last_key = key;
+    }
+    for _ in last_key.iter() {
+        println!("_ => panic!(\"default\"),");
+        println!("}}");
+    }
+    println!("_ => panic!(\"default\"),");
+    println!("}}");
 
     todo!()
 }

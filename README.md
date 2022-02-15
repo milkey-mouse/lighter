@@ -1,1 +1,1 @@
-# `lighter` - a minor improvement on a `match`
+# `lighter` - slightly better than a `match`
