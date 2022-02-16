@@ -1,0 +1,16 @@
+[package]
+name = "lighter-derive"
+version = "0.1.0"
+edition = "2021"
+
+# TODO
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1.0"
+proc-macro-crate = "1.1"
+quote = "1.0"
+syn = { version = "1.0", features = ["full", "extra-traits"] } # TODO: extra-traits only needed for debugging
