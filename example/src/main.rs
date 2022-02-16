@@ -1,10 +1,11 @@
 use lighter::lighter;
 
 fn main() {
-    let x = "ab";
+    let x = "";
+    let mut i = x.bytes();
 
     lighter! {
-        match x {
+        match i.next() {
             "\u{0009}" | "\u{000a}" | "\u{000b}" | "\u{000c}" |
             "\u{000d}" | "\u{0020}" | "\u{0085}" | "\u{00a0}" |
             "\u{1680}" | "\u{2000}" | "\u{2001}" | "\u{2002}" |
@@ -16,15 +17,3 @@ fn main() {
         }
     }
 }
-
-
-/*match "h" {
-    "h" => match "i" {
-        "i" => match "" {
-            "" => x,
-            _ => wild,
-        }
-        _ => wild,
-    }
-    _ => wild,
-}*/

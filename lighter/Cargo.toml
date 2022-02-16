@@ -10,5 +10,7 @@ edition = "2021"
 proc-macro = true
 
 [dependencies]
-syn = { version = "1.0", features = ["full", "extra-traits"] } # TODO: extra-traits only needed for debugging
 proc-macro2 = "1.0"
+syn = { version = "1.0", features = ["full", "extra-traits"] } # TODO: extra-traits only needed for debugging
+quote = "1.0" # TODO
+once_cell = { version = "1.9", default-features = false }
