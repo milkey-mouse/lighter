@@ -1,12 +1,19 @@
 use lighter::lighter;
+use std::io::{self, BufRead, Result};
 
-fn main() {
-    let x = b" ";
+fn main() -> Result<()> {
+    println!("write a single character to stdin and I'll tell you if it's whitespace!");
+
+    let line = io::stdin()
+        .lock()
+        .lines()
+        .next()
+        .expect("couldn't read line from stdin")?;
 
     println!(
         "{}",
         lighter! {
-            match x {
+            match line {
                 "\u{0009}" | "\u{000a}" | "\u{000b}" | "\u{000c}" |
                 "\u{000d}" | "\u{0020}" | "\u{0085}" | "\u{00a0}" |
                 "\u{1680}" | "\u{2000}" | "\u{2001}" | "\u{2002}" |
@@ -18,4 +25,6 @@ fn main() {
             }
         }
     );
+
+    Ok(())
 }

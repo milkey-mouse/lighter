@@ -21,18 +21,20 @@ fn insert_arm(m: &mut ExprMatch, case: &[u8], arm: Arm) {
                     path,
                     pat: PatTuple { elems, .. },
                     ..
-                }) if elems.len() == 1 && *path == parse_quote!(::core::option::Option::Some) => match elems.first() {
-                    Some(Pat::Lit(PatLit { expr, .. })) => match expr.as_ref() {
-                        Expr::Lit(ExprLit {
-                            lit: Lit::Byte(b), ..
-                        }) if b.value() == *prefix => match m_arm.body.as_mut() {
-                            Expr::Match(m_inner) => Some(m_inner),
-                            a => panic!("non-match match arm {:?}", a),
+                }) if elems.len() == 1 && *path == parse_quote!(::core::option::Option::Some) => {
+                    match elems.first() {
+                        Some(Pat::Lit(PatLit { expr, .. })) => match expr.as_ref() {
+                            Expr::Lit(ExprLit {
+                                lit: Lit::Byte(b), ..
+                            }) if b.value() == *prefix => match m_arm.body.as_mut() {
+                                Expr::Match(m_inner) => Some(m_inner),
+                                a => panic!("non-match match arm {:?}", a),
+                            },
+                            _ => None,
                         },
-                        _ => None,
-                    },
-                    a => panic!("weird arm {:?}", a),
-                },
+                        a => panic!("weird arm {:?}", a),
+                    }
+                }
                 _ => None,
             });
 
