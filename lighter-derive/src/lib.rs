@@ -184,6 +184,12 @@ fn parse_arm(match_out: &mut Expr, wild: &mut Vec<Arm>, arm: Arm, prefix: bool) 
         Pat::Lit(ref expr) => match expr.expr.as_ref() {
             Expr::Lit(expr) => match &expr.lit {
                 Lit::Str(expr) => insert_arm(match_out, expr.value().as_bytes(), arm, prefix),
+                Lit::Byte(expr) => insert_arm(match_out, &[expr.value()], arm, prefix),
+                Lit::Char(expr) => {
+                    let mut buf = [0; 4];
+                    let c = expr.value().encode_utf8(&mut buf).as_bytes();
+                    insert_arm(match_out, c, arm, prefix)
+                }
                 // TODO: handle if guards
                 _ => todo!("non-str lit"),
             },
