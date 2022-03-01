@@ -1,11 +1,11 @@
+use core::{iter, mem};
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use proc_macro_crate::{crate_name, FoundCrate};
 use quote::{quote, quote_spanned};
-use std::mem;
 use syn::{
     parse_macro_input, parse_quote, parse_quote_spanned, parse_str, spanned::Spanned, Arm, Expr,
-    ExprMatch, Ident, Lit, LitByte, Pat,
+    ExprArray, ExprMatch, Ident, Lit, LitByte, Pat, PatIdent,
 };
 
 // return the body of the arm of `m` with the given byte as its pattern, if it exists
@@ -24,8 +24,6 @@ fn find_arm(m: &mut ExprMatch, byte: u8) -> Option<&mut Expr> {
                             }
                         }
                     }
-                } else {
-                    panic!("weird arm {:?}", expr.pat.elems);
                 }
             }
         }
@@ -161,18 +159,120 @@ fn insert_arm(expr: &mut Expr, case: &[u8], arm: Arm, match_prefix: bool) {
 }
 
 // recursively append wild/fallback cases to every match expression that doesn't already have one
-fn insert_wild(expr: &mut Expr, wild: &[Arm]) {
+// TODO: what if wild case comes earlier than the last in the match statement?
+fn insert_wild(expr: &mut Expr, wild: &[Arm], prefix: &mut Vec<u8>) {
     if let Expr::Match(m) = expr {
         let mut has_wild = false;
         for arm in m.arms.iter_mut() {
-            insert_wild(arm.body.as_mut(), wild);
-            if let Pat::Wild(_) = arm.pat {
-                has_wild = true;
+            match &arm.pat {
+                Pat::Wild(_) => {
+                    has_wild = true;
+                    insert_wild(arm.body.as_mut(), wild, prefix);
+                }
+                Pat::TupleStruct(expr) => {
+                    if expr.path == parse_quote!(::core::option::Option::Some)
+                        && expr.pat.elems.len() == 1
+                    {
+                        if let Some(Pat::Lit(expr)) = expr.pat.elems.first() {
+                            if let Expr::Lit(expr) = expr.expr.as_ref() {
+                                if let Lit::Byte(b) = &expr.lit {
+                                    prefix.push(b.value());
+                                    insert_wild(arm.body.as_mut(), wild, prefix);
+                                    assert_eq!(prefix.pop().unwrap(), b.value());
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                    panic!("non-Some() TupleStruct");
+                }
+                p => panic!("weird pat when adding wild arms: {:?}", p),
             }
         }
 
         if !has_wild {
-            m.arms.extend_from_slice(wild);
+            for arm in wild {
+                match &arm.pat {
+                    Pat::Wild(_) => m.arms.push(arm.clone()),
+                    Pat::Ident(PatIdent {
+                        attrs,
+                        by_ref,
+                        mutability,
+                        ident,
+                        subpat,
+                    }) => {
+                        assert!(by_ref.is_none());
+                        assert!(subpat.is_none());
+
+                        // we need to handle two cases: one where we *did* read
+                        // another byte (i.e. the iterator returned Some(b) and
+                        // one where the iterator didn't read another byte (it
+                        // returned None), but the wild case should still run
+                        // with any previously read bytes (those in `prefix`)
+
+                        // TODO: maybe this sort of wild arm should be added as
+                        // we go along instead of after all the others, so that
+                        // the following code would yield an "unreachable expr"
+                        // error for the second match arm:
+                        // ```
+                        // match b {
+                        //     s => println!("matched wild {}", s);
+                        //     Prefix('x') => println!("matched x");
+                        // }
+                        // ```
+
+                        // make a short name for arm.body because quote! would
+                        // expand #arm.body as (#arm).body, not #(arm.body)
+                        let body = &arm.body;
+
+                        // add match arm for the Some(b) case
+                        {
+                            let len = prefix.len() + 1;
+                            let bytes = prefix
+                                .iter()
+                                .map(|b| quote!(#b))
+                                .chain(iter::once(quote!(__lighter_internal_last_byte)));
+
+                            m.arms.push(Arm {
+                                attrs: arm.attrs.clone(),
+                                pat: parse_quote!(::core::option::Option::Some(
+                                    __lighter_internal_last_byte
+                                )),
+                                guard: arm.guard.clone(),
+                                fat_arrow_token: arm.fat_arrow_token,
+                                body: Box::new(parse_quote! {
+                                    {
+                                        let #mutability #ident: [u8; #len] = [#(#bytes),*];
+                                        #body
+                                    }
+                                }),
+                                comma: arm.comma,
+                            });
+                        }
+
+                        // add match arm for the None case
+                        {
+                            let len = prefix.len();
+                            let bytes = prefix.iter().map(|b| quote!(#b));
+
+                            m.arms.push(Arm {
+                                attrs: arm.attrs.clone(),
+                                pat: parse_quote!(::core::option::Option::None),
+                                guard: arm.guard.clone(),
+                                fat_arrow_token: arm.fat_arrow_token,
+                                body: Box::new(parse_quote! {
+                                    {
+                                        let #mutability #ident: [u8; #len] = [#(#bytes),*];
+                                        #body
+                                    }
+                                }),
+                                comma: arm.comma,
+                            });
+                        }
+                    }
+                    _ => todo!(),
+                }
+            }
         }
     }
 }
@@ -204,7 +304,7 @@ fn parse_arm(match_out: &mut Expr, wild: &mut Vec<Arm>, arm: Arm, prefix: bool) 
             };
 
             parse_arm(match_out, wild, arm, true)
-        } // TODO
+        }
         Pat::Or(expr) => {
             //for pat in &expr.cases {
             for pat in expr.cases {
@@ -223,7 +323,7 @@ fn parse_arm(match_out: &mut Expr, wild: &mut Vec<Arm>, arm: Arm, prefix: bool) 
                 )
             }
         }
-        Pat::Wild(_) => wild.push(arm),
+        Pat::Ident(_) | Pat::Wild(_) => wild.push(arm),
         x => todo!("non-lit pat {:?}", x),
         //_ => todo!("non-lit pat"),
     }
@@ -243,6 +343,7 @@ pub fn lighter(input: TokenStream) -> TokenStream {
     }
 
     let mut wild = Vec::new();
+    // TODO: lighter! { match { Prefix("") => {} } } should consume 0 bytes/do nothing
     let mut match_out = Expr::Match(ExprMatch {
         attrs,
         match_token,
@@ -255,7 +356,7 @@ pub fn lighter(input: TokenStream) -> TokenStream {
         parse_arm(&mut match_out, &mut wild, arm, false);
     }
 
-    insert_wild(&mut match_out, &wild);
+    insert_wild(&mut match_out, &wild, &mut Vec::new());
 
     let krate = match crate_name("lighter") {
         Ok(FoundCrate::Name(name)) => Ident::new(&name, Span::call_site()),
