@@ -1,10 +1,14 @@
 [package]
 name = "lighter-derive"
 version = "0.1.0"
+authors = ["Milkey Mouse <milkeymouse@meme.institute>"]
 edition = "2021"
-
-# TODO
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+description = "Procedural macros for the lighter crate"
+readme = "../README.md"
+repository = "https://github.com/milkey-mouse/lighter"
+license = "CC0-1.0"
+keywords = ["match", "string", "bytes", "trie", "optimization"]
+categories = ["data-structures", "no-std", "parsing", "rust-patterns", "text-processing"]
 
 [lib]
 proc-macro = true
@@ -13,7 +17,7 @@ proc-macro = true
 proc-macro2 = "1.0"
 proc-macro-crate = "1.1"
 quote = "1.0"
-syn = { version = "1.0", features = ["full", "extra-traits"] } # TODO: extra-traits only needed for debugging
+syn = { version = "1.0", features = ["full", "extra-traits"] }
 
 [features]
 default = ["std"]

@@ -1,12 +1,17 @@
 [package]
 name = "lighter"
 version = "0.1.0"
+authors = ["Milkey Mouse <milkeymouse@meme.institute>"]
 edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+description = "Macro for rewriting string matches as tries"
+readme = "../README.md"
+repository = "https://github.com/milkey-mouse/lighter"
+license = "CC0-1.0"
+keywords = ["match", "string", "bytes", "trie", "optimization"]
+categories = ["data-structures", "no-std", "parsing", "rust-patterns", "text-processing"]
 
 [dependencies]
-lighter-derive = { path = "../lighter-derive", default-features = false }
+lighter-derive = { path = "../lighter-derive", version = "0.1.0", default-features = false }
 
 [features]
 default = ["std"]
