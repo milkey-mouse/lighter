@@ -12,15 +12,21 @@ use syn::{
 fn find_arm(m: &mut ExprMatch, byte: u8) -> Option<&mut Expr> {
     for arm in m.arms.iter_mut() {
         // these ugly nested if statements are just to get at
-        // the literal byte (e.g. 1 in Option::Some(b'\x01'))
+        // the literal byte (e.g. the 1 in Some(Ok(b'\x01')))
         if let Pat::TupleStruct(expr) = &arm.pat {
             if expr.path == parse_quote!(::core::option::Option::Some) && expr.pat.elems.len() == 1
             {
-                if let Some(Pat::Lit(expr)) = expr.pat.elems.first() {
-                    if let Expr::Lit(expr) = expr.expr.as_ref() {
-                        if let Lit::Byte(b) = &expr.lit {
-                            if b.value() == byte {
-                                return Some(&mut arm.body);
+                if let Some(Pat::TupleStruct(expr)) = expr.pat.elems.first() {
+                    if expr.path == parse_quote!(::core::result::Result::Ok)
+                        && expr.pat.elems.len() == 1
+                    {
+                        if let Some(Pat::Lit(expr)) = expr.pat.elems.first() {
+                            if let Expr::Lit(expr) = expr.expr.as_ref() {
+                                if let Lit::Byte(b) = &expr.lit {
+                                    if b.value() == byte {
+                                        return Some(&mut arm.body);
+                                    }
+                                }
                             }
                         }
                     }
@@ -44,7 +50,10 @@ fn insert_arm(expr: &mut Expr, case: &[u8], arm: Arm, match_prefix: bool) {
                     // when we are only matching a prefix, we don't care what
                     // comes after the prefix, or whether the string ends after
                     // the characters we've matched so far
-                    parse_quote!(_)
+                    parse_quote! {
+                        ::core::option::Option::Some(::core::result::Result::Ok(_)) |
+                        ::core::option::Option::None
+                    }
                 } else {
                     parse_quote!(::core::option::Option::None)
                 },
@@ -72,6 +81,7 @@ fn insert_arm(expr: &mut Expr, case: &[u8], arm: Arm, match_prefix: bool) {
                     let e = mem::replace(expr, parse_quote!({}));
                     *expr = parse_quote! {
                         match __lighter_internal_iter.next() {
+                            ::core::option::Option::Some(::core::result::Result::Err(e)) => ::core::result::Result::Err(e),
                             _ => #e,
                             #arm
                         }
@@ -91,7 +101,7 @@ fn insert_arm(expr: &mut Expr, case: &[u8], arm: Arm, match_prefix: bool) {
             b.set_span(arm.pat.span());
 
             let arm = Arm {
-                pat: parse_quote!(::core::option::Option::Some(#b)),
+                pat: parse_quote!(::core::option::Option::Some(::core::result::Result::Ok(#b))),
                 ..arm
             };
 
@@ -101,6 +111,7 @@ fn insert_arm(expr: &mut Expr, case: &[u8], arm: Arm, match_prefix: bool) {
                     let e = mem::replace(expr, parse_quote!({}));
                     *expr = parse_quote! {
                         match __lighter_internal_iter.next() {
+                            ::core::option::Option::Some(::core::result::Result::Err(e)) => ::core::result::Result::Err(e),
                             _ => #e,
                             #arm
                         }
@@ -128,7 +139,9 @@ fn insert_arm(expr: &mut Expr, case: &[u8], arm: Arm, match_prefix: bool) {
 
                         // TODO: parse_quote_spanned! ?
                         m.arms.push(parse_quote! {
-                            ::core::option::Option::Some(#b) => match __lighter_internal_iter.next() {},
+                            ::core::option::Option::Some(::core::result::Result::Ok(#b)) => match __lighter_internal_iter.next() {
+                                ::core::option::Option::Some(::core::result::Result::Err(e)) => ::core::result::Result::Err(e),
+                            },
                         });
 
                         m.arms.last_mut().unwrap().body.as_mut()
@@ -150,7 +163,9 @@ fn insert_arm(expr: &mut Expr, case: &[u8], arm: Arm, match_prefix: bool) {
                 *expr = parse_quote! {
                     match __lighter_internal_iter.next() {
                         _ => #e,
-                        ::core::option::Option::Some(#b) => match __lighter_internal_iter.next() {},
+                        ::core::option::Option::Some(::core::result::Result::Ok(#b)) => match __lighter_internal_iter.next() {
+                            ::core::option::Option::Some(::core::result::Result::Err(e)) => ::core::result::Result::Err(e),
+                        },
                     }
                 };
             }
@@ -173,18 +188,24 @@ fn insert_wild(expr: &mut Expr, wild: &[Arm], prefix: &mut Vec<u8>) {
                     if expr.path == parse_quote!(::core::option::Option::Some)
                         && expr.pat.elems.len() == 1
                     {
-                        if let Some(Pat::Lit(expr)) = expr.pat.elems.first() {
-                            if let Expr::Lit(expr) = expr.expr.as_ref() {
-                                if let Lit::Byte(b) = &expr.lit {
-                                    prefix.push(b.value());
-                                    insert_wild(arm.body.as_mut(), wild, prefix);
-                                    assert_eq!(prefix.pop().unwrap(), b.value());
-                                    continue;
+                        if let Some(Pat::TupleStruct(expr)) = expr.pat.elems.first() {
+                            if expr.path == parse_quote!(::core::result::Result::Ok)
+                                && expr.pat.elems.len() == 1
+                            {
+                                if let Some(Pat::Lit(expr)) = expr.pat.elems.first() {
+                                    if let Expr::Lit(expr) = expr.expr.as_ref() {
+                                        if let Lit::Byte(b) = &expr.lit {
+                                            prefix.push(b.value());
+                                            insert_wild(arm.body.as_mut(), wild, prefix);
+                                            assert_eq!(prefix.pop().unwrap(), b.value());
+                                            continue;
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
-                    panic!("non-Some() TupleStruct");
+                    println!("non-Some(Ok) TupleStruct: {}", quote!(#expr).to_string());
                 }
                 p => panic!("weird pat when adding wild arms: {:?}", p),
             }
@@ -235,9 +256,9 @@ fn insert_wild(expr: &mut Expr, wild: &[Arm], prefix: &mut Vec<u8>) {
 
                             m.arms.push(Arm {
                                 attrs: arm.attrs.clone(),
-                                pat: parse_quote!(::core::option::Option::Some(
+                                pat: parse_quote!(::core::option::Option::Some(::core::result::Result::Ok(
                                     __lighter_internal_last_byte
-                                )),
+                                ))),
                                 guard: arm.guard.clone(),
                                 fat_arrow_token: arm.fat_arrow_token,
                                 body: Box::new(parse_quote! {
@@ -349,7 +370,9 @@ pub fn lighter(input: TokenStream) -> TokenStream {
         match_token,
         expr: parse_quote_spanned!(expr.span()=> __lighter_internal_iter.next()),
         brace_token,
-        arms: Vec::new(), // TODO
+        arms: vec![parse_quote! {
+            ::core::option::Option::Some(::core::result::Result::Err(e)) => ::core::result::Result::Err(e),
+        }],
     });
 
     for arm in arms {
@@ -363,15 +386,17 @@ pub fn lighter(input: TokenStream) -> TokenStream {
         _ => parse_quote!(lighter),
     };
 
+    // TODO
     let make_iter = quote_spanned! {expr.span()=>
-        (&mut &mut &mut ::#krate::__internal::Wrap(Some(#expr))).bytes()
+        //(&mut &mut &mut ::#krate::__internal::Wrap(Some(#expr))).bytes()
+        (&mut ::#krate::__internal::Wrap(Some(#expr))).bytes()
     };
 
     TokenStream::from(quote! {
         {
             use ::#krate::__internal::*;
             let mut __lighter_internal_iter = #make_iter;
-            #match_out
+            (&mut Wrap(#match_out)).maybe_unwrap()
         }
     })
 }
