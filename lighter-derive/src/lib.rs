@@ -1,8 +1,9 @@
-use core::{iter, mem};
+use core::iter;
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use proc_macro_crate::{crate_name, FoundCrate};
 use quote::{quote, quote_spanned};
+use replace_with::replace_with;
 use syn::{
     parse_macro_input, parse_quote, parse_quote_spanned, parse_str, spanned::Spanned, Arm, Expr,
     ExprArray, ExprMatch, Ident, Lit, LitByte, Pat, PatIdent,
@@ -12,15 +13,21 @@ use syn::{
 fn find_arm(m: &mut ExprMatch, byte: u8) -> Option<&mut Expr> {
     for arm in m.arms.iter_mut() {
         // these ugly nested if statements are just to get at
-        // the literal byte (e.g. 1 in Option::Some(b'\x01'))
+        // the literal byte (e.g. the 1 in Some(Ok(b'\x01')))
         if let Pat::TupleStruct(expr) = &arm.pat {
             if expr.path == parse_quote!(::core::option::Option::Some) && expr.pat.elems.len() == 1
             {
-                if let Some(Pat::Lit(expr)) = expr.pat.elems.first() {
-                    if let Expr::Lit(expr) = expr.expr.as_ref() {
-                        if let Lit::Byte(b) = &expr.lit {
-                            if b.value() == byte {
-                                return Some(&mut arm.body);
+                if let Some(Pat::TupleStruct(expr)) = expr.pat.elems.first() {
+                    if expr.path == parse_quote!(::core::result::Result::Ok)
+                        && expr.pat.elems.len() == 1
+                    {
+                        if let Some(Pat::Lit(expr)) = expr.pat.elems.first() {
+                            if let Expr::Lit(expr) = expr.expr.as_ref() {
+                                if let Lit::Byte(b) = &expr.lit {
+                                    if b.value() == byte {
+                                        return Some(&mut arm.body);
+                                    }
+                                }
                             }
                         }
                     }
@@ -32,28 +39,37 @@ fn find_arm(m: &mut ExprMatch, byte: u8) -> Option<&mut Expr> {
     None
 }
 
-fn insert_arm(expr: &mut Expr, case: &[u8], arm: Arm, match_prefix: bool) {
+fn insert_arm(expr: &mut Expr, case: &[u8], mut arm: Arm, match_prefix: bool) {
     match case {
         // we are at a leaf: for an n-character string, we're n matches deep,
         // and so we have no more chars to match. iff the iterator is empty &
         // thus the string we're matching is over, or if we are only matching
         // a prefix, the original arm's body runs
         [] => {
-            let arm = Arm {
-                pat: if match_prefix {
-                    // when we are only matching a prefix, we don't care what
-                    // comes after the prefix, or whether the string ends after
-                    // the characters we've matched so far
-                    parse_quote!(_)
-                } else {
-                    parse_quote!(::core::option::Option::None)
-                },
-                ..arm
-            };
+            if match_prefix {
+                // when we are only matching a prefix, we don't care what comes
+                // after the prefix, or whether the string ends after the chars
+                // we've matched so far
+                arm.pat = parse_quote! {
+                    ::core::option::Option::Some(::core::result::Result::Ok(_)) |
+                    ::core::option::Option::None
+                };
+            } else {
+                arm.pat = parse_quote!(::core::option::Option::None);
+            }
 
             match expr {
                 // if expr is already a match statement, we can add to it as is
-                Expr::Match(m) => m.arms.push(arm),
+                Expr::Match(m) => {
+                    // wrap arm body in Result::Ok()
+                    replace_with(
+                        arm.body.as_mut(),
+                        || parse_quote!({}), // default value only instantiated on panic
+                        |expr| parse_quote!(::core::result::Result::Ok(#expr)),
+                    );
+
+                    m.arms.push(arm);
+                }
 
                 // if our input is some other sort of statement, make it a wild
                 // match arm that will come first and always execute, such that
@@ -68,15 +84,19 @@ fn insert_arm(expr: &mut Expr, case: &[u8], arm: Arm, match_prefix: bool) {
                 //     _ => unreachable!(),
                 // } }
                 // ```
-                expr => {
-                    let e = mem::replace(expr, parse_quote!({}));
-                    *expr = parse_quote! {
-                        match __lighter_internal_iter.next() {
-                            _ => #e,
-                            #arm
+                expr => replace_with(
+                    expr,
+                    || parse_quote!({}), // default value only instantiated on panic
+                    |expr| {
+                        parse_quote! {
+                            match __lighter_internal_iter.next() {
+                                ::core::option::Option::Some(::core::result::Result::Err(e)) => ::core::result::Result::Err(e),
+                                _ => #expr,
+                                #arm
+                            }
                         }
-                    };
-                }
+                    },
+                ),
             }
         }
 
@@ -84,28 +104,36 @@ fn insert_arm(expr: &mut Expr, case: &[u8], arm: Arm, match_prefix: bool) {
         // statement a level after this to check iterator.next() = None, as
         // it's OK for the iterator to have more items after this one
         [prefix] if match_prefix => {
-            // the format! is a workaround for a bug in
-            // LitByte::value where values created with
-            // LitByte::new are not parsed correctly
+            // the format! is a workaround for a bug in LitByte::value where
+            // values created with LitByte::new are not parsed correctly
+            // (TODO: report this bug)
             let mut b = parse_str::<LitByte>(&format!("b'\\x{:02x}'", prefix)).unwrap();
             b.set_span(arm.pat.span());
 
-            let arm = Arm {
-                pat: parse_quote!(::core::option::Option::Some(#b)),
-                ..arm
-            };
+            arm.pat = parse_quote!(::core::option::Option::Some(::core::result::Result::Ok(#b)));
+
+            // wrap arm body in Result::Ok()
+            replace_with(
+                arm.body.as_mut(),
+                || parse_quote!({}), // default value only instantiated on panic
+                |expr| parse_quote!(::core::result::Result::Ok(#expr)),
+            );
 
             match expr {
                 Expr::Match(m) => m.arms.push(arm),
-                expr => {
-                    let e = mem::replace(expr, parse_quote!({}));
-                    *expr = parse_quote! {
-                        match __lighter_internal_iter.next() {
-                            _ => #e,
-                            #arm
+                expr => replace_with(
+                    expr,
+                    || parse_quote!({}), // default value only instantiated on panic
+                    |expr| {
+                        parse_quote! {
+                            match __lighter_internal_iter.next() {
+                                ::core::option::Option::Some(::core::result::Result::Err(e)) => ::core::result::Result::Err(e),
+                                _ => #expr,
+                                #arm
+                            }
                         }
-                    }
-                }
+                    },
+                ),
             }
         }
 
@@ -128,7 +156,9 @@ fn insert_arm(expr: &mut Expr, case: &[u8], arm: Arm, match_prefix: bool) {
 
                         // TODO: parse_quote_spanned! ?
                         m.arms.push(parse_quote! {
-                            ::core::option::Option::Some(#b) => match __lighter_internal_iter.next() {},
+                            ::core::option::Option::Some(::core::result::Result::Ok(#b)) => match __lighter_internal_iter.next() {
+                                ::core::option::Option::Some(::core::result::Result::Err(e)) => ::core::result::Result::Err(e),
+                            },
                         });
 
                         m.arms.last_mut().unwrap().body.as_mut()
@@ -138,21 +168,26 @@ fn insert_arm(expr: &mut Expr, case: &[u8], arm: Arm, match_prefix: bool) {
                 insert_arm(m_arm, suffix, arm, match_prefix);
             }
             expr => {
-                // the format! is a workaround for a bug in
-                // LitByte::value where values created with
-                // LitByte::new are not parsed correctly
+                // the format! is a workaround for a bug in LitByte::value where
+                // values created with LitByte::new are not parsed correctly
                 // (TODO: report this bug)
                 let mut b = parse_str::<LitByte>(&format!("b'\\x{:02x}'", prefix)).unwrap();
                 b.set_span(arm.pat.span());
 
-                // TODO: is there a simpler placeholder expression than {}?
-                let e = mem::replace(expr, parse_quote!({}));
-                *expr = parse_quote! {
-                    match __lighter_internal_iter.next() {
-                        _ => #e,
-                        ::core::option::Option::Some(#b) => match __lighter_internal_iter.next() {},
-                    }
-                };
+                replace_with(
+                    expr,
+                    || parse_quote!({}), // default value only instantiated on panic
+                    |expr| {
+                        parse_quote! {
+                            match __lighter_internal_iter.next() {
+                                _ => #expr,
+                                ::core::option::Option::Some(::core::result::Result::Ok(#b)) => match __lighter_internal_iter.next() {
+                                    ::core::option::Option::Some(::core::result::Result::Err(e)) => ::core::result::Result::Err(e),
+                                },
+                            }
+                        }
+                    },
+                );
             }
         },
     }
@@ -173,18 +208,24 @@ fn insert_wild(expr: &mut Expr, wild: &[Arm], prefix: &mut Vec<u8>) {
                     if expr.path == parse_quote!(::core::option::Option::Some)
                         && expr.pat.elems.len() == 1
                     {
-                        if let Some(Pat::Lit(expr)) = expr.pat.elems.first() {
-                            if let Expr::Lit(expr) = expr.expr.as_ref() {
-                                if let Lit::Byte(b) = &expr.lit {
-                                    prefix.push(b.value());
-                                    insert_wild(arm.body.as_mut(), wild, prefix);
-                                    assert_eq!(prefix.pop().unwrap(), b.value());
-                                    continue;
+                        if let Some(Pat::TupleStruct(expr)) = expr.pat.elems.first() {
+                            if expr.path == parse_quote!(::core::result::Result::Ok)
+                                && expr.pat.elems.len() == 1
+                            {
+                                if let Some(Pat::Lit(expr)) = expr.pat.elems.first() {
+                                    if let Expr::Lit(expr) = expr.expr.as_ref() {
+                                        if let Lit::Byte(b) = &expr.lit {
+                                            prefix.push(b.value());
+                                            insert_wild(arm.body.as_mut(), wild, prefix);
+                                            assert_eq!(prefix.pop().unwrap(), b.value());
+                                            continue;
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
-                    panic!("non-Some() TupleStruct");
+                    // TODO println!("non-Some(Ok) TupleStruct: {}", quote!(#expr).to_string());
                 }
                 p => panic!("weird pat when adding wild arms: {:?}", p),
             }
@@ -193,7 +234,19 @@ fn insert_wild(expr: &mut Expr, wild: &[Arm], prefix: &mut Vec<u8>) {
         if !has_wild {
             for arm in wild {
                 match &arm.pat {
-                    Pat::Wild(_) => m.arms.push(arm.clone()),
+                    Pat::Wild(_) => {
+                        // non-dotted name for quote!
+                        let body = &arm.body;
+
+                        m.arms.push(Arm {
+                            attrs: arm.attrs.clone(),
+                            pat: arm.pat.clone(),
+                            guard: arm.guard.clone(),
+                            fat_arrow_token: arm.fat_arrow_token,
+                            body: Box::new(parse_quote!(::core::result::Result::Ok(#body))),
+                            comma: arm.comma,
+                        });
+                    }
                     Pat::Ident(PatIdent {
                         attrs,
                         by_ref,
@@ -221,7 +274,7 @@ fn insert_wild(expr: &mut Expr, wild: &[Arm], prefix: &mut Vec<u8>) {
                         // }
                         // ```
 
-                        // make a short name for arm.body because quote! would
+                        // make a short name for arm.body, because quote! would
                         // expand #arm.body as (#arm).body, not #(arm.body)
                         let body = &arm.body;
 
@@ -236,14 +289,14 @@ fn insert_wild(expr: &mut Expr, wild: &[Arm], prefix: &mut Vec<u8>) {
                             m.arms.push(Arm {
                                 attrs: arm.attrs.clone(),
                                 pat: parse_quote!(::core::option::Option::Some(
-                                    __lighter_internal_last_byte
+                                    ::core::result::Result::Ok(__lighter_internal_last_byte)
                                 )),
                                 guard: arm.guard.clone(),
                                 fat_arrow_token: arm.fat_arrow_token,
                                 body: Box::new(parse_quote! {
                                     {
                                         let #mutability #ident: [u8; #len] = [#(#bytes),*];
-                                        #body
+                                        ::core::result::Result::Ok(#body)
                                     }
                                 }),
                                 comma: arm.comma,
@@ -263,7 +316,7 @@ fn insert_wild(expr: &mut Expr, wild: &[Arm], prefix: &mut Vec<u8>) {
                                 body: Box::new(parse_quote! {
                                     {
                                         let #mutability #ident: [u8; #len] = [#(#bytes),*];
-                                        #body
+                                        ::core::result::Result::Ok(#body)
                                     }
                                 }),
                                 comma: arm.comma,
@@ -349,7 +402,9 @@ pub fn lighter(input: TokenStream) -> TokenStream {
         match_token,
         expr: parse_quote_spanned!(expr.span()=> __lighter_internal_iter.next()),
         brace_token,
-        arms: Vec::new(), // TODO
+        arms: vec![parse_quote! {
+            ::core::option::Option::Some(::core::result::Result::Err(e)) => ::core::result::Result::Err(e),
+        }],
     });
 
     for arm in arms {
@@ -363,15 +418,17 @@ pub fn lighter(input: TokenStream) -> TokenStream {
         _ => parse_quote!(lighter),
     };
 
+    // TODO
     let make_iter = quote_spanned! {expr.span()=>
-        (&mut &mut &mut ::#krate::__internal::Wrap(Some(#expr))).bytes()
+        //(&mut &mut &mut ::#krate::__internal::Wrap(Some(#expr))).bytes()
+        (&mut ::#krate::__internal::Wrap(::core::option::Option::Some(#expr))).bytes()
     };
 
     TokenStream::from(quote! {
         {
             use ::#krate::__internal::*;
             let mut __lighter_internal_iter = #make_iter;
-            #match_out
+            (&mut &mut ::#krate::__internal::Wrap(::core::option::Option::Some(#match_out))).maybe_unwrap()
         }
     })
 }
@@ -387,3 +444,5 @@ mod tests {
     }
 }
 */
+
+// TODO: lots of spurious (I hope) "unreachable call" warnings when compiling jidoka

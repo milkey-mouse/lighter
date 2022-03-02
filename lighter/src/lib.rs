@@ -1,3 +1,4 @@
+#![feature(result_copied)] // TODO
 pub use lighter_derive::lighter;
 
 #[doc(hidden)]
