@@ -68,6 +68,20 @@ fn insert_arm(expr: &mut Expr, case: &[u8], mut arm: Arm, match_prefix: bool) {
                         |expr| parse_quote!(::core::result::Result::Ok(#expr)),
                     );
 
+                    // we are stuck between a rock and a hard place: if the arm
+                    // is something like _ => Ok(continue), rustc will throw an
+                    // "unreachable call" warning because the Ok will never be
+                    // constructed. on the other hand, if we disable this
+                    // warning for the entire match arm, real unreachable code
+                    // warnings for the original match arm body are ignored. we
+                    // choose to ignore all unreachable code warnings because
+                    // in my experience so far that has been more ergononic for
+                    // the user versus printing many spurious errors.
+                    // TODO: when attributes can be added to expressions stably
+                    // just make the body #[allow(unreachable_code)] Ok(#expr)
+                    // https://github.com/rust-lang/rust/issues/15701
+                    arm.attrs.push(parse_quote!(#[allow(unreachable_code)]));
+
                     m.arms.push(arm);
                 }
 
@@ -92,7 +106,7 @@ fn insert_arm(expr: &mut Expr, case: &[u8], mut arm: Arm, match_prefix: bool) {
                             match __lighter_internal_iter.next() {
                                 ::core::option::Option::Some(::core::result::Result::Err(e)) => ::core::result::Result::Err(e),
                                 _ => #expr,
-                                #arm
+                                #[allow(unreachable_code)] #arm
                             }
                         }
                     },
@@ -118,6 +132,8 @@ fn insert_arm(expr: &mut Expr, case: &[u8], mut arm: Arm, match_prefix: bool) {
                 || parse_quote!({}), // default value only instantiated on panic
                 |expr| parse_quote!(::core::result::Result::Ok(#expr)),
             );
+
+            arm.attrs.push(parse_quote!(#[allow(unreachable_code)]));
 
             match expr {
                 Expr::Match(m) => m.arms.push(arm),
@@ -180,7 +196,7 @@ fn insert_arm(expr: &mut Expr, case: &[u8], mut arm: Arm, match_prefix: bool) {
                     |expr| {
                         parse_quote! {
                             match __lighter_internal_iter.next() {
-                                _ => #expr,
+                                #[allow(unreachable_code)] _ => #expr,
                                 ::core::option::Option::Some(::core::result::Result::Ok(#b)) => match __lighter_internal_iter.next() {
                                     ::core::option::Option::Some(::core::result::Result::Err(e)) => ::core::result::Result::Err(e),
                                 },
@@ -239,7 +255,12 @@ fn insert_wild(expr: &mut Expr, wild: &[Arm], prefix: &mut Vec<u8>) {
                         let body = &arm.body;
 
                         m.arms.push(Arm {
-                            attrs: arm.attrs.clone(),
+                            attrs: arm
+                                .attrs
+                                .iter()
+                                .cloned()
+                                .chain(iter::once(parse_quote!(#[allow(unreachable_code)])))
+                                .collect(),
                             pat: arm.pat.clone(),
                             guard: arm.guard.clone(),
                             fat_arrow_token: arm.fat_arrow_token,
@@ -287,7 +308,12 @@ fn insert_wild(expr: &mut Expr, wild: &[Arm], prefix: &mut Vec<u8>) {
                                 .chain(iter::once(quote!(__lighter_internal_last_byte)));
 
                             m.arms.push(Arm {
-                                attrs: arm.attrs.clone(),
+                                attrs: arm
+                                    .attrs
+                                    .iter()
+                                    .cloned()
+                                    .chain(iter::once(parse_quote!(#[allow(unreachable_code)])))
+                                    .collect(),
                                 pat: parse_quote!(::core::option::Option::Some(
                                     ::core::result::Result::Ok(__lighter_internal_last_byte)
                                 )),
@@ -309,7 +335,12 @@ fn insert_wild(expr: &mut Expr, wild: &[Arm], prefix: &mut Vec<u8>) {
                             let bytes = prefix.iter().map(|b| quote!(#b));
 
                             m.arms.push(Arm {
-                                attrs: arm.attrs.clone(),
+                                attrs: arm
+                                    .attrs
+                                    .iter()
+                                    .cloned()
+                                    .chain(iter::once(parse_quote!(#[allow(unreachable_code)])))
+                                    .collect(),
                                 pat: parse_quote!(::core::option::Option::None),
                                 guard: arm.guard.clone(),
                                 fat_arrow_token: arm.fat_arrow_token,
